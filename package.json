@@ -16,7 +16,8 @@
     "db:seed": "tsx scripts/bootstrap.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "start:railway": "prisma migrate deploy && tsx scripts/bootstrap.ts && next start"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.1",
