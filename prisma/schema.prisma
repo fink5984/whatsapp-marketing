@@ -1,0 +1,1072 @@
+// WhatsApp Campaign Manager — multi-tenant data model.
+// Every tenant-owned row carries organizationId; all access goes through
+// org-scoped services (src/server). Timestamps are stored in UTC.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum Role {
+  OWNER
+  ADMIN
+  CAMPAIGN_MANAGER
+  VIEWER
+}
+
+enum OrgStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ConnectionStatus {
+  PENDING_SETUP
+  CONNECTED
+  ERROR
+  DISCONNECTED
+}
+
+enum ConnectionMethod {
+  MANUAL
+  EMBEDDED_SIGNUP
+}
+
+enum ConsentStatus {
+  UNKNOWN
+  GRANTED
+  REVOKED
+}
+
+enum ConsentSource {
+  WEB_FORM
+  PAPER_FORM
+  VERBAL_RECORDED
+  INBOUND_MESSAGE
+  IMPORT_WITH_PROOF
+  API
+  MANUAL_WITH_PROOF
+  // Israeli Communications Law 30A(c): existing customer who was offered to refuse ads
+  EXISTING_CUSTOMER
+  OTHER_DOCUMENTED
+}
+
+enum SuppressionReason {
+  KEYWORD_REPLY
+  QUICK_REPLY_BUTTON
+  MANUAL_REQUEST
+  META_USER_STOPPED_MARKETING
+  COMPLAINT
+  DATA_DELETION
+  API
+}
+
+enum TemplateCategory {
+  MARKETING
+  UTILITY
+  AUTHENTICATION
+}
+
+enum TemplateStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+  PAUSED
+  DISABLED
+  IN_APPEAL
+  ARCHIVED
+  DELETED
+  UNKNOWN
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  QUEUED
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum RecipientEligibility {
+  ELIGIBLE
+  EXCLUDED
+}
+
+enum OutboundKind {
+  CAMPAIGN
+  TEST
+  SERVICE_REPLY
+  UNSUBSCRIBE_CONFIRMATION
+}
+
+enum OutboundStatus {
+  QUEUED
+  SENDING
+  SUBMITTED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  SKIPPED
+  CANCELLED
+  UNCERTAIN
+}
+
+enum ConversationStatus {
+  OPEN
+  HANDLED
+  INTERESTED
+  NOT_INTERESTED
+  NEEDS_AGENT
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  WON
+  LOST
+}
+
+enum DeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  DEAD
+}
+
+enum ImportStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum ComplianceCheckStatus {
+  NOT_STARTED
+  PASSED
+  FAILED
+  EXPIRED
+}
+
+// ─────────────────────── Tenancy & identity ───────────────────────
+
+model Plan {
+  id            String         @id @default(cuid())
+  code          String         @unique
+  name          String
+  limits        Json           @default("{}")
+  createdAt     DateTime       @default(now())
+  organizations Organization[]
+
+  @@map("plans")
+}
+
+model Organization {
+  id        String    @id @default(cuid())
+  name      String
+  slug      String    @unique
+  status    OrgStatus @default(ACTIVE)
+  industry  String?
+  planId    String?
+  plan      Plan?     @relation(fields: [planId], references: [id])
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  settings          BusinessSettings?
+  members           OrganizationMember[]
+  invitations       Invitation[]
+  whatsappAccounts  WhatsappAccount[]
+  phoneNumbers      WhatsappPhoneNumber[]
+  contacts          Contact[]
+  consents          ContactConsent[]
+  tags              Tag[]
+  audiences         Audience[]
+  suppressions      SuppressionEntry[]
+  templates         MessageTemplate[]
+  campaigns         Campaign[]
+  recipients        CampaignRecipient[]
+  outboundMessages  OutboundMessage[]
+  messageEvents     MessageEvent[]
+  conversations     Conversation[]
+  inboundMessages   InboundMessage[]
+  trackedLinks      TrackedLink[]
+  linkClicks        LinkClick[]
+  leads             Lead[]
+  conversions       Conversion[]
+  automationRules   AutomationRule[]
+  apiKeys           ApiKey[]
+  webhookEndpoints  WebhookEndpoint[]
+  webhookDeliveries WebhookDelivery[]
+  auditLogs         AuditLog[]
+  complianceChecks  ComplianceCheck[]
+  imports           ContactImport[]
+  sheetSources      GoogleSheetSource[]
+  subscriptions     Subscription[]
+  usageCounters     UsageCounter[]
+
+  @@map("organizations")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String
+  passwordHash  String
+  isActive      Boolean   @default(true)
+  lastLoginAt   DateTime?
+  failedLogins  Int       @default(0)
+  lockedUntil   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  memberships       OrganizationMember[]
+  sessions          Session[]
+  assignedConvos    Conversation[]       @relation("ConversationAssignee")
+  auditLogs         AuditLog[]
+
+  @@map("users")
+}
+
+model Session {
+  id          String   @id @default(cuid())
+  tokenHash   String   @unique
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeOrgId String?
+  ip          String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model OrganizationMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           Role
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model Invitation {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String
+  role           Role
+  tokenHash      String       @unique
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+  @@map("invitations")
+}
+
+model Subscription {
+  id                 String       @id @default(cuid())
+  organizationId     String
+  organization       Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  planCode           String
+  status             String
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  externalRef        String?
+  createdAt          DateTime     @default(now())
+
+  @@index([organizationId])
+  @@map("subscriptions")
+}
+
+model UsageCounter {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  metric         String
+  periodStart    DateTime
+  value          Int          @default(0)
+
+  @@unique([organizationId, metric, periodStart])
+  @@map("usage_counters")
+}
+
+model BusinessSettings {
+  id                      String       @id @default(cuid())
+  organizationId          String       @unique
+  organization            Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  displayName             String?
+  legalName               String?
+  businessIdNumber        String?
+  contactPhone            String?
+  contactEmail            String?
+  websiteUrl              String?
+  privacyPolicyUrl        String?
+  logoUrl                 String?
+  timezone                String       @default("Asia/Jerusalem")
+  locale                  String       @default("he")
+  defaultCountry          String       @default("IL")
+  defaultWhatsappAccountId String?
+  // Sending window: { "0": ["09:00","20:00"], ... } keyed by weekday (0 = Sunday)
+  sendingWindow           Json
+  safetyRollingCap        Int          @default(250)
+  defaultMessagesPerSecond Int         @default(5)
+  unsubscribeFooterText   String       @default("להסרה מרשימת התפוצה, השיבו הסר")
+  unsubscribeKeywords     String[]
+  sendUnsubscribeConfirmation Boolean  @default(true)
+  unsubscribeConfirmationText String   @default("הבקשה התקבלה. הוסרתם מרשימת התפוצה ולא תקבלו מאיתנו הודעות שיווקיות נוספות.")
+  requireAdvertisingLabel Boolean      @default(true)
+  perContactClickTracking Boolean      @default(true)
+  allowedRedirectDomains  String[]
+  testRecipients          String[]
+  // { "MARKETING": 0.0, "UTILITY": 0.0 } per message, in costCurrency
+  costRates               Json         @default("{}")
+  costCurrency            String       @default("USD")
+  retentionInboundDays    Int          @default(730)
+  retentionClicksDays     Int          @default(365)
+  retentionWebhookRawDays Int          @default(30)
+  retentionAuditDays      Int          @default(1095)
+  alertEmails             String[]
+  alertOnQualityDrop      Boolean      @default(true)
+  alertOnSendErrors       Boolean      @default(true)
+  updatedAt               DateTime     @updatedAt
+
+  @@map("business_settings")
+}
+
+model ComplianceCheck {
+  id             String                @id @default(cuid())
+  organizationId String
+  organization   Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ruleCode       String
+  status         ComplianceCheckStatus @default(NOT_STARTED)
+  evidence       String?
+  reviewerName   String?
+  reviewedById   String?
+  reviewedAt     DateTime?
+  expiresAt      DateTime?
+  updatedAt      DateTime              @updatedAt
+
+  @@unique([organizationId, ruleCode])
+  @@map("compliance_checks")
+}
+
+// ───────────────────────── WhatsApp accounts ─────────────────────────
+
+model WhatsappAccount {
+  id                   String           @id @default(cuid())
+  organizationId       String
+  organization         Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name                 String
+  wabaId               String
+  metaAppId            String?
+  connectionMethod     ConnectionMethod @default(MANUAL)
+  status               ConnectionStatus @default(PENDING_SETUP)
+  statusMessage        String?
+  // AES-256-GCM encrypted secrets (see src/server/crypto.ts)
+  accessTokenEnc       String?
+  appSecretEnc         String?
+  webhookVerifyTokenEnc String?
+  // Random, non-guessable path segment for the per-account webhook URL
+  webhookKey           String           @unique
+  webhookSubscribedAt  DateTime?
+  lastWebhookAt        DateTime?
+  templateNamespace    String?
+  currency             String?
+  lastHealthCheckAt    DateTime?
+  lastTemplateSyncAt   DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  phoneNumbers WhatsappPhoneNumber[]
+  templates    MessageTemplate[]
+  campaigns    Campaign[]
+
+  @@unique([organizationId, wabaId])
+  @@index([wabaId])
+  @@map("whatsapp_accounts")
+}
+
+model WhatsappPhoneNumber {
+  id                 String           @id @default(cuid())
+  organizationId     String
+  organization       Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  accountId          String
+  account            WhatsappAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  // Meta's Phone Number ID — globally unique, used to route webhooks to a tenant
+  phoneNumberId      String           @unique
+  displayPhoneNumber String?
+  verifiedName       String?
+  qualityRating      String?
+  messagingLimitTier String?
+  throughputLevel    String?
+  nameStatus         String?
+  status             ConnectionStatus @default(PENDING_SETUP)
+  messagesPerSecond  Int?
+  isDefault          Boolean          @default(false)
+  lastCheckedAt      DateTime?
+  // Worker lease: only one worker paces sends for a given number at a time
+  sendLeaseOwner     String?
+  sendLeaseUntil     DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  campaigns        Campaign[]
+  outboundMessages OutboundMessage[]
+  inboundMessages  InboundMessage[]
+  conversations    Conversation[]
+
+  @@index([organizationId])
+  @@map("whatsapp_phone_numbers")
+}
+
+// ───────────────────────────── Contacts ─────────────────────────────
+
+model Contact {
+  id               String        @id @default(cuid())
+  organizationId   String
+  organization     Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  phoneE164        String
+  name             String?
+  source           String?
+  notes            String?
+  attributes       Json          @default("{}")
+  consentStatus    ConsentStatus @default(UNKNOWN)
+  consentUpdatedAt DateTime?
+  isSuppressed     Boolean       @default(false)
+  lastSentAt       DateTime?
+  sentCount        Int           @default(0)
+  deliveredCount   Int           @default(0)
+  readCount        Int           @default(0)
+  clickCount       Int           @default(0)
+  lastInboundAt    DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  consents         ContactConsent[]
+  tags             ContactTag[]
+  audienceMembers  AudienceMember[]
+  recipients       CampaignRecipient[]
+  outboundMessages OutboundMessage[]
+  inboundMessages  InboundMessage[]
+  conversations    Conversation[]
+  linkClicks       LinkClick[]
+  leads            Lead[]
+
+  @@unique([organizationId, phoneE164])
+  @@index([organizationId, consentStatus, isSuppressed])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, source])
+  @@map("contacts")
+}
+
+model ContactConsent {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contactId      String
+  contact        Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  status         ConsentStatus
+  source         ConsentSource
+  // Scope: channel + purpose + the business the consent was given to
+  channel        String        @default("WHATSAPP")
+  purpose        String        @default("MARKETING")
+  businessName   String
+  proofText      String
+  proofReference String?
+  capturedAt     DateTime
+  recordedById   String?
+  recordedVia    String
+  createdAt      DateTime      @default(now())
+
+  @@index([organizationId, contactId, createdAt])
+  @@map("contact_consents")
+}
+
+model Tag {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  color          String?
+  createdAt      DateTime     @default(now())
+  contacts       ContactTag[]
+
+  @@unique([organizationId, name])
+  @@map("tags")
+}
+
+model ContactTag {
+  contactId String
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([contactId, tagId])
+  @@index([tagId])
+  @@map("contact_tags")
+}
+
+model Audience {
+  id             String           @id @default(cuid())
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  // STATIC = explicit membership; DYNAMIC = evaluated from `filter` at use time
+  kind           String           @default("STATIC")
+  filter         Json?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  members        AudienceMember[]
+
+  @@unique([organizationId, name])
+  @@map("audiences")
+}
+
+model AudienceMember {
+  audienceId String
+  audience   Audience @relation(fields: [audienceId], references: [id], onDelete: Cascade)
+  contactId  String
+  contact    Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  addedAt    DateTime @default(now())
+
+  @@id([audienceId, contactId])
+  @@index([contactId])
+  @@map("audience_members")
+}
+
+// Suppression survives contact deletion: phoneHash is an HMAC of the E.164 number.
+model SuppressionEntry {
+  id              String            @id @default(cuid())
+  organizationId  String
+  organization    Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  phoneHash       String
+  phoneE164       String?
+  contactId       String?
+  reason          SuppressionReason
+  detail          String?
+  sourceMessageId String?
+  createdById     String?
+  createdAt       DateTime          @default(now())
+  liftedAt        DateTime?
+  liftedConsentId String?
+  liftedById      String?
+
+  @@index([organizationId, phoneHash, liftedAt])
+  @@index([organizationId, createdAt])
+  @@map("suppression_entries")
+}
+
+model ContactImport {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  source         String
+  fileName       String?
+  status         ImportStatus @default(PENDING)
+  totalRows      Int          @default(0)
+  created        Int          @default(0)
+  updated        Int          @default(0)
+  skipped        Int          @default(0)
+  invalid        Int          @default(0)
+  suppressedKept Int          @default(0)
+  errors         Json         @default("[]")
+  createdById    String?
+  createdAt      DateTime     @default(now())
+  finishedAt     DateTime?
+
+  @@index([organizationId, createdAt])
+  @@map("contact_imports")
+}
+
+model GoogleSheetSource {
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name              String
+  spreadsheetId     String
+  range             String
+  columnMap         Json
+  defaultTags       String[]
+  audienceId        String?
+  syncIntervalMin   Int?
+  lastSyncAt        DateTime?
+  lastSyncStatus    String?
+  lastSyncMessage   String?
+  createdAt         DateTime     @default(now())
+
+  @@index([organizationId])
+  @@map("google_sheet_sources")
+}
+
+// ───────────────────────────── Templates ─────────────────────────────
+
+model MessageTemplate {
+  id              String           @id @default(cuid())
+  organizationId  String
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  accountId       String
+  account         WhatsappAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  metaTemplateId  String?
+  name            String
+  language        String
+  category        TemplateCategory
+  status          TemplateStatus   @default(DRAFT)
+  rejectedReason  String?
+  qualityScore    String?
+  // Meta component JSON (HEADER / BODY / FOOTER / BUTTONS)
+  components      Json
+  hasUnsubscribeFooter Boolean     @default(false)
+  hasUnsubscribeButton Boolean     @default(false)
+  hasAdvertisingLabel  Boolean     @default(false)
+  lastSyncedAt    DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  campaigns       Campaign[]
+
+  @@unique([accountId, name, language])
+  @@index([organizationId, status])
+  @@map("message_templates")
+}
+
+// ───────────────────────────── Campaigns ─────────────────────────────
+
+model Campaign {
+  id              String          @id @default(cuid())
+  organizationId  String
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  tags            String[]
+  accountId       String?
+  account         WhatsappAccount? @relation(fields: [accountId], references: [id])
+  phoneNumberId   String?
+  phoneNumber     WhatsappPhoneNumber? @relation(fields: [phoneNumberId], references: [id])
+  templateId      String?
+  template        MessageTemplate? @relation(fields: [templateId], references: [id])
+  // { audienceIds, tagIds, sources, excludeCampaignIds, activity, ... }
+  audienceFilter  Json            @default("{}")
+  // { "body.1": { type: "contact_field", field: "name", fallback: "" }, ... }
+  variableMapping Json            @default("{}")
+  headerMediaUrl  String?
+  trackedLinkId   String?
+  status          CampaignStatus  @default(DRAFT)
+  scheduledAt     DateTime?
+  maxRecipients   Int?
+  messagesPerSecond Int?
+  respectSendingWindow Boolean    @default(true)
+  estimatedCost   Decimal?        @db.Decimal(12, 4)
+  costCurrency    String?
+  eligibleCount   Int             @default(0)
+  excludedCount   Int             @default(0)
+  launchedAt      DateTime?
+  launchedById    String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  pausedReason    String?
+  failureReason   String?
+  createdById     String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  recipients       CampaignRecipient[]
+  outboundMessages OutboundMessage[]
+  trackedLinks     TrackedLink[]
+  leads            Lead[]
+  conversions      Conversion[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@index([status, scheduledAt])
+  @@map("campaigns")
+}
+
+model CampaignRecipient {
+  id              String               @id @default(cuid())
+  organizationId  String
+  organization    Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaignId      String
+  campaign        Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId       String?
+  contact         Contact?             @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  phoneE164       String?
+  eligibility     RecipientEligibility
+  exclusionReason String?
+  // Random token used in per-recipient tracked URLs (never contains PII)
+  clickToken      String?              @unique
+  createdAt       DateTime             @default(now())
+  message         OutboundMessage?
+
+  @@unique([campaignId, contactId])
+  @@index([organizationId, campaignId, eligibility])
+  @@map("campaign_recipients")
+}
+
+model OutboundMessage {
+  id               String          @id @default(cuid())
+  organizationId   String
+  organization     Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  kind             OutboundKind
+  campaignId       String?
+  campaign         Campaign?       @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  recipientId      String?         @unique
+  recipient        CampaignRecipient? @relation(fields: [recipientId], references: [id], onDelete: SetNull)
+  contactId        String?
+  contact          Contact?        @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  conversationId   String?
+  conversation     Conversation?   @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  phoneNumberId    String
+  phoneNumber      WhatsappPhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
+  toPhone          String?
+  toPhoneHash      String
+  // Full Graph API request body (template/text) — built at enqueue time
+  payload          Json
+  templateName     String?
+  category         TemplateCategory?
+  status           OutboundStatus  @default(QUEUED)
+  // Sent as biz_opaque_callback_data so status webhooks can be reconciled even
+  // if we crashed before recording the wamid.
+  bizOpaqueId      String          @unique @default(cuid())
+  wamid            String?         @unique
+  attempts         Int             @default(0)
+  maxAttempts      Int             @default(5)
+  nextAttemptAt    DateTime        @default(now())
+  lockedAt         DateTime?
+  lockedBy         String?
+  errorCode        String?
+  errorTitle       String?
+  errorDetail      String?
+  billable         Boolean?
+  pricingCategory  String?
+  queuedAt         DateTime        @default(now())
+  submittedAt      DateTime?
+  sentAt           DateTime?
+  deliveredAt      DateTime?
+  readAt           DateTime?
+  failedAt         DateTime?
+  createdById      String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  events           MessageEvent[]
+
+  @@index([status, nextAttemptAt])
+  @@index([organizationId, campaignId, status])
+  @@index([organizationId, createdAt])
+  @@index([phoneNumberId, submittedAt])
+  @@index([organizationId, toPhoneHash])
+  @@map("outbound_messages")
+}
+
+model MessageEvent {
+  id             String          @id @default(cuid())
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  messageId      String
+  message        OutboundMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  // queued | submitted | sent | delivered | read | failed | skipped | cancelled | uncertain | retry
+  type           String
+  occurredAt     DateTime
+  // Dedupe key: e.g. "<wamid>:<status>:<timestamp>" for webhook statuses
+  dedupeKey      String          @unique
+  detail         Json?
+  createdAt      DateTime        @default(now())
+
+  @@index([organizationId, occurredAt])
+  @@index([messageId])
+  @@map("message_events")
+}
+
+// Raw webhook intake — persisted first, processed after (retryable, idempotent).
+model WebhookEvent {
+  id            String    @id @default(cuid())
+  organizationId String?
+  accountId     String?
+  payloadHash   String    @unique
+  payload       Json
+  receivedAt    DateTime  @default(now())
+  processedAt   DateTime?
+  attempts      Int       @default(0)
+  lastError     String?
+
+  @@index([processedAt, receivedAt])
+  @@map("webhook_events")
+}
+
+// ───────────────────────────── Inbox ─────────────────────────────
+
+model Conversation {
+  id              String             @id @default(cuid())
+  organizationId  String
+  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  phoneNumberId   String
+  phoneNumber     WhatsappPhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
+  contactId       String
+  contact         Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  status          ConversationStatus @default(OPEN)
+  assigneeId      String?
+  assignee        User?              @relation("ConversationAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  notes           String?
+  lastInboundAt   DateTime?
+  lastMessageAt   DateTime?
+  unreadCount     Int                @default(0)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  inboundMessages InboundMessage[]
+  outboundMessages OutboundMessage[]
+
+  @@unique([phoneNumberId, contactId])
+  @@index([organizationId, lastMessageAt])
+  @@index([organizationId, status])
+  @@map("conversations")
+}
+
+model InboundMessage {
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversationId  String
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contactId       String
+  contact         Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  phoneNumberId   String
+  phoneNumber     WhatsappPhoneNumber @relation(fields: [phoneNumberId], references: [id], onDelete: Cascade)
+  wamid           String       @unique
+  type            String
+  text            String?
+  buttonPayload   String?
+  buttonText      String?
+  contextWamid    String?
+  raw             Json?
+  isUnsubscribe   Boolean      @default(false)
+  campaignId      String?
+  receivedAt      DateTime
+  createdAt       DateTime     @default(now())
+
+  @@index([organizationId, receivedAt])
+  @@index([conversationId, receivedAt])
+  @@map("inbound_messages")
+}
+
+// ───────────────────────── Links, leads, conversions ─────────────────────────
+
+model TrackedLink {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaignId     String?
+  campaign       Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  name           String
+  token          String       @unique
+  destinationUrl String
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  clicks         LinkClick[]
+
+  @@index([organizationId])
+  @@map("tracked_links")
+}
+
+model LinkClick {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  linkId         String
+  link           TrackedLink  @relation(fields: [linkId], references: [id], onDelete: Cascade)
+  campaignId     String?
+  recipientId    String?
+  contactId      String?
+  contact        Contact?     @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  // Daily-rotating keyed hash of IP+UA, for unique counting without storing IPs
+  visitorHash    String
+  isBot          Boolean      @default(false)
+  isUnique       Boolean      @default(false)
+  userAgent      String?
+  clickedAt      DateTime     @default(now())
+
+  @@index([organizationId, clickedAt])
+  @@index([linkId, clickedAt])
+  @@index([campaignId])
+  @@map("link_clicks")
+}
+
+model Lead {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contactId      String?
+  contact        Contact?     @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  campaignId     String?
+  campaign       Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  source         String
+  status         LeadStatus   @default(NEW)
+  value          Decimal?     @db.Decimal(14, 2)
+  notes          String?
+  externalId     String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, status])
+  @@map("leads")
+}
+
+model Conversion {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  campaignId     String?
+  campaign       Campaign?    @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  contactId      String?
+  clickToken     String?
+  type           String
+  value          Decimal?     @db.Decimal(14, 2)
+  currency       String?
+  externalId     String?
+  metadata       Json         @default("{}")
+  occurredAt     DateTime     @default(now())
+
+  @@unique([organizationId, externalId])
+  @@index([organizationId, occurredAt])
+  @@map("conversions")
+}
+
+// ───────────────────────── Automation & integrations ─────────────────────────
+
+model AutomationRule {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  isActive       Boolean      @default(true)
+  // INBOUND_KEYWORD | BUTTON_PAYLOAD | ANY_INBOUND
+  trigger        String
+  // { keywords: string[], match: "exact"|"contains", payloads: string[] }
+  conditions     Json
+  // [{ type: "TAG_CONTACT", tagId } | { type: "CREATE_LEAD" } | { type: "SET_CONVERSATION_STATUS", status } | ...]
+  actions        Json
+  priority       Int          @default(100)
+  lastFiredAt    DateTime?
+  fireCount      Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([organizationId, isActive])
+  @@map("automation_rules")
+}
+
+model ApiKey {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  prefix         String       @unique
+  keyHash        String       @unique
+  scopes         String[]
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  createdById    String?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+model WebhookEndpoint {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  url            String
+  secretEnc      String
+  events         String[]
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  deliveries     WebhookDelivery[]
+
+  @@index([organizationId])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id             String          @id @default(cuid())
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  endpointId     String
+  endpoint       WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  event          String
+  payload        Json
+  status         DeliveryStatus  @default(PENDING)
+  attempts       Int             @default(0)
+  nextAttemptAt  DateTime        @default(now())
+  responseCode   Int?
+  lastError      String?
+  createdAt      DateTime        @default(now())
+  deliveredAt    DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([organizationId, createdAt])
+  @@map("webhook_deliveries")
+}
+
+model AuditLog {
+  id             String       @id @default(cuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actorUserId    String?
+  actorUser      User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  actorApiKeyId  String?
+  actorType      String
+  action         String
+  entityType     String?
+  entityId       String?
+  metadata       Json         @default("{}")
+  ip             String?
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, entityType, entityId])
+  @@map("audit_logs")
+}
+
+// ───────────────────────────── Infrastructure ─────────────────────────────
+
+model RateLimitBucket {
+  key       String   @id
+  count     Int
+  resetAt   DateTime
+
+  @@index([resetAt])
+  @@map("rate_limit_buckets")
+}
+
+model WorkerHeartbeat {
+  workerId  String   @id
+  hostname  String?
+  startedAt DateTime
+  beatAt    DateTime
+  info      Json     @default("{}")
+
+  @@map("worker_heartbeats")
+}
